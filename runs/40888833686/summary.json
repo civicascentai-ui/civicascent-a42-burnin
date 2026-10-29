@@ -1,0 +1,15 @@
+{
+  "test": "C4.2 off-box burn-in",
+  "runner": "GitHub-hosted ubuntu-latest",
+  "run_url": "https://github.com/civicascentai-ui/civicascent-a42-burnin/actions/runs/40888833686",
+  "started_utc": "2026-10-29T14:10:26.712887+00:00",
+  "ended_utc": "2026-10-29T16:10:27.125740+00:00",
+  "duration_s": 7200.4,
+  "checks": 121,
+  "probes_failed": 0,
+  "max_inter_check_gap_s": 60.0,
+  "gap_limit_s": 120.0,
+  "all_probes_passed": true,
+  "continuity_passed": true,
+  "c42_pass": true
+}
