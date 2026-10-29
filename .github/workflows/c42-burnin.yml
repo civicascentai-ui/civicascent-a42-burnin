@@ -1,0 +1,88 @@
+# civicascent-a42-burnin
+name: C4.2 off-box burn-in
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/c42-burnin.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: c42-burnin
+  cancel-in-progress: false
+jobs:
+  burnin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Two-hour probe loop (60 s interval, 120 s gap limit)
+        shell: python
+        run: |
+          import json, time, hashlib, urllib.request, urllib.error, datetime, os
+          URLS = [
+            "https://civicascent-console-001.vercel.app/",
+            "https://civicascent-console-001-staged-qc.vercel.app/",
+            "https://civicascent-console-001.vercel.app/api/health",
+          ]
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **k): return None
+          opener = urllib.request.build_opener(NoRedirect)
+          DURATION, INTERVAL, MAX_GAP = 7200, 60, 120.0
+          os.makedirs("results", exist_ok=True)
+          log = open("results/probes.ndjson", "w")
+          t0 = time.monotonic(); last = None; max_gap = 0.0; n = 0; fails = 0
+          started = datetime.datetime.now(datetime.timezone.utc).isoformat()
+          while True:
+            now = time.monotonic()
+            if last is not None: max_gap = max(max_gap, now - last)
+            last = now; n += 1
+            rec = {"check": n, "utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                   "elapsed_s": round(now - t0, 1), "probes": []}
+            for u in URLS:
+              p = {"url": u}
+              try:
+                r = opener.open(urllib.request.Request(u, headers={"User-Agent": "c42-burnin"}), timeout=20)
+                body = r.read(); p["http_status"] = r.status
+              except urllib.error.HTTPError as e:
+                body = e.read() if hasattr(e, "read") else b""; p["http_status"] = e.code
+              except Exception as e:
+                body = b""; p["http_status"] = None; p["error"] = type(e).__name__
+              p["bytes"] = len(body); p["sha256"] = hashlib.sha256(body).hexdigest()
+              ok = p["http_status"] == 200
+              if u.endswith("/api/health"):
+                try: ok = ok and json.loads(body).get("status") == "HEALTHY"
+                except Exception: ok = False
+              p["passed"] = ok
+              if not ok: fails += 1
+              rec["probes"].append(p)
+            rec["max_inter_check_gap_s"] = round(max_gap, 1)
+            log.write(json.dumps(rec) + "\n"); log.flush()
+            print(json.dumps({k: rec[k] for k in ("check", "utc", "max_inter_check_gap_s")}),
+                  [p["http_status"] for p in rec["probes"]], flush=True)
+            if now - t0 >= DURATION: break
+            time.sleep(max(0, INTERVAL - (time.monotonic() - now)))
+          summary = {"test": "C4.2 off-box burn-in", "runner": "GitHub-hosted ubuntu-latest",
+                     "run_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+                     "started_utc": started, "ended_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                     "duration_s": round(time.monotonic() - t0, 1), "checks": n, "probes_failed": fails,
+                     "max_inter_check_gap_s": round(max_gap, 1), "gap_limit_s": MAX_GAP,
+                     "all_probes_passed": fails == 0, "continuity_passed": max_gap <= MAX_GAP,
+                     "c42_pass": fails == 0 and max_gap <= MAX_GAP and n >= 115}
+          json.dump(summary, open("results/summary.json", "w"), indent=2)
+          print(json.dumps(summary, indent=2))
+      - name: Hash results
+        if: always()
+        run: cd results && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: c42-burnin-results
+          path: results/
+      - name: Commit results to repo for read-only review
+        if: always()
+        run: |
+          mkdir -p runs/${GITHUB_RUN_ID} && cp results/* runs/${GITHUB_RUN_ID}/
+          git config user.name "c42-burnin-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add runs && git commit -m "C4.2 results for run ${GITHUB_RUN_ID}" && git push
