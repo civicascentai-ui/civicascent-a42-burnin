@@ -1,25 +1,34 @@
-# civicascent-a42-burnin
+# civicascent-a42-burnin, C4.2 8-hour off-box burn-in, draft r2 (two overlapping 5 h legs)
 name: C4.2 off-box burn-in
 on:
   push:
     branches: [main]
     paths: ['.github/workflows/c42-burnin.yml']
   workflow_dispatch:
+    inputs:
+      part:
+        description: "1 = first leg (dispatches leg 2 at 4 h), 2 = second leg"
+        default: "1"
+      leg1_run_id:
+        description: "Set automatically by leg 1 when it dispatches leg 2"
+        default: ""
 permissions:
   contents: write
-concurrency:
-  group: c42-burnin
-  cancel-in-progress: false
+  actions: write
 jobs:
   burnin:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 345
     steps:
-      - uses: actions/checkout@v4
-      - name: Two-hour probe loop (60 s interval, 120 s gap limit)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Leg probe loop, 5 h per leg, legs overlap 1 h (60 s interval, 120 s gap limit)
         shell: python
+        env:
+          PART: ${{ github.event.inputs.part || '1' }}
+          LEG1_RUN_ID: ${{ github.event.inputs.leg1_run_id || '' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          import json, time, hashlib, urllib.request, urllib.error, datetime, os
+          import json, time, hashlib, urllib.request, urllib.error, datetime, os, subprocess, threading
           URLS = [
             "https://civicascent-console-001.vercel.app/",
             "https://civicascent-console-001-staged-qc.vercel.app/",
@@ -28,16 +37,42 @@ jobs:
           class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *a, **k): return None
           opener = urllib.request.build_opener(NoRedirect)
-          DURATION, INTERVAL, MAX_GAP = 7200, 60, 120.0
+          DURATION, INTERVAL, MAX_GAP, MIN_CHECKS = 18000, 60, 120.0, 295
+          HANDOFF_AT = 14400
+          PART = os.environ["PART"]
+          RUN_ID = os.environ["GITHUB_RUN_ID"]
+          REPO = os.environ["GITHUB_REPOSITORY"]
+          def utcnow(): return datetime.datetime.now(datetime.timezone.utc)
+          handoff = {"applicable": PART == "1", "status": "NOT_ATTEMPTED" if PART == "1" else "NOT_APPLICABLE", "attempts": []}
+          def do_handoff():
+            backoff = [0, 10, 20]
+            for i, wait in enumerate(backoff, 1):
+              time.sleep(wait)
+              t = utcnow()
+              try:
+                rc = subprocess.run(["gh", "workflow", "run", "c42-burnin.yml", "-R", REPO, "--ref", "main",
+                                     "-f", "part=2", "-f", f"leg1_run_id={RUN_ID}"],
+                                    timeout=30, capture_output=True).returncode
+              except Exception as e:
+                rc = type(e).__name__
+              handoff["attempts"].append({"attempt": i, "utc": t.isoformat(), "epoch": round(t.timestamp(), 3), "rc": rc})
+              print(json.dumps({"handoff_attempt": i, "rc": rc, "utc": t.isoformat()}), flush=True)
+              if rc == 0:
+                handoff["status"] = "DISPATCHED"
+                print("HANDOFF DISPATCHED: leg 2 requested", flush=True)
+                return
+            handoff["status"] = "FAILED"
+            print("HANDOFF FAILED: leg 2 was not dispatched after 3 attempts; missing leg 2 means C4.2 FAIL OPEN", flush=True)
           os.makedirs("results", exist_ok=True)
           log = open("results/probes.ndjson", "w")
           t0 = time.monotonic(); last = None; max_gap = 0.0; n = 0; fails = 0
-          started = datetime.datetime.now(datetime.timezone.utc).isoformat()
+          start_dt = utcnow(); handoff_thread = None
           while True:
             now = time.monotonic()
             if last is not None: max_gap = max(max_gap, now - last)
             last = now; n += 1
-            rec = {"check": n, "utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            t = utcnow()
+            rec = {"leg": PART, "check": n, "utc": t.isoformat(), "epoch": round(t.timestamp(), 3),
                    "elapsed_s": round(now - t0, 1), "probes": []}
             for u in URLS:
               p = {"url": u}
@@ -58,26 +93,38 @@ jobs:
               rec["probes"].append(p)
             rec["max_inter_check_gap_s"] = round(max_gap, 1)
             log.write(json.dumps(rec) + "\n"); log.flush()
-            print(json.dumps({k: rec[k] for k in ("check", "utc", "max_inter_check_gap_s")}),
+            print(json.dumps({k: rec[k] for k in ("leg", "check", "utc", "max_inter_check_gap_s")}),
                   [p["http_status"] for p in rec["probes"]], flush=True)
+            if PART == "1" and handoff_thread is None and now - t0 >= HANDOFF_AT:
+              handoff_thread = threading.Thread(target=do_handoff, daemon=True); handoff_thread.start()
             if now - t0 >= DURATION: break
             time.sleep(max(0, INTERVAL - (time.monotonic() - now)))
-          summary = {"test": "C4.2 off-box burn-in", "runner": "GitHub-hosted ubuntu-latest",
-                     "run_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
-                     "started_utc": started, "ended_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                     "duration_s": round(time.monotonic() - t0, 1), "checks": n, "probes_failed": fails,
-                     "max_inter_check_gap_s": round(max_gap, 1), "gap_limit_s": MAX_GAP,
+          if handoff_thread is not None: handoff_thread.join(timeout=120)
+          if PART == "1" and handoff["status"] == "NOT_ATTEMPTED":
+            handoff["status"] = "FAILED"
+            print("HANDOFF FAILED: handoff point was never reached; missing leg 2 means C4.2 FAIL OPEN", flush=True)
+          end_dt = utcnow()
+          leg_ok = fails == 0 and max_gap <= MAX_GAP and n >= MIN_CHECKS
+          summary = {"test": "C4.2 off-box burn-in", "leg": PART, "runner": "GitHub-hosted ubuntu-latest",
+                     "run_id": RUN_ID,
+                     "run_url": f"{os.environ['GITHUB_SERVER_URL']}/{REPO}/actions/runs/{RUN_ID}",
+                     "leg1_run_id": RUN_ID if PART == "1" else (os.environ["LEG1_RUN_ID"] or None),
+                     "started_utc": start_dt.isoformat(), "started_epoch": round(start_dt.timestamp(), 3),
+                     "ended_utc": end_dt.isoformat(), "ended_epoch": round(end_dt.timestamp(), 3),
+                     "duration_s": round(time.monotonic() - t0, 1), "checks": n, "min_checks": MIN_CHECKS,
+                     "probes_failed": fails, "max_inter_check_gap_s": round(max_gap, 1), "gap_limit_s": MAX_GAP,
                      "all_probes_passed": fails == 0, "continuity_passed": max_gap <= MAX_GAP,
-                     "c42_pass": fails == 0 and max_gap <= MAX_GAP and n >= 115}
+                     "leg_threshold_met": leg_ok, "handoff": handoff,
+                     "note": "Per-leg workflow flags only. Cross-leg continuity (leg 2 start before leg 1 end, max gap across merged timeline) is computed by the grader. Missing leg 2 means C4.2 FAIL OPEN."}
           json.dump(summary, open("results/summary.json", "w"), indent=2)
           print(json.dumps(summary, indent=2))
       - name: Hash results
         if: always()
         run: cd results && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: c42-burnin-results
+          name: c42-burnin-results-leg${{ github.event.inputs.part || '1' }}
           path: results/
       - name: Commit results to repo for read-only review
         if: always()
@@ -85,4 +132,4 @@ jobs:
           mkdir -p runs/${GITHUB_RUN_ID} && cp results/* runs/${GITHUB_RUN_ID}/
           git config user.name "c42-burnin-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add runs && git commit -m "C4.2 results for run ${GITHUB_RUN_ID}" && git push
+          git add runs && git commit -m "C4.2 results for run ${GITHUB_RUN_ID} [skip ci]" && (git push || (git pull --rebase && git push))
