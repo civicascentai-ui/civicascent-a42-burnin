@@ -1,0 +1,34 @@
+{
+  "test": "C4.2 off-box burn-in",
+  "leg": "1",
+  "runner": "GitHub-hosted ubuntu-latest",
+  "run_id": "41146027505",
+  "run_url": "https://github.com/civicascentai-ui/civicascent-a42-burnin/actions/runs/41146027505",
+  "leg1_run_id": "41146027505",
+  "started_utc": "2026-10-30T23:42:21.902205+00:00",
+  "started_epoch": 1793403741.902,
+  "ended_utc": "2026-10-31T04:42:22.476118+00:00",
+  "ended_epoch": 1793421742.476,
+  "duration_s": 18000.6,
+  "checks": 301,
+  "min_checks": 295,
+  "probes_failed": 0,
+  "max_inter_check_gap_s": 60.0,
+  "gap_limit_s": 120.0,
+  "all_probes_passed": true,
+  "continuity_passed": true,
+  "leg_threshold_met": true,
+  "handoff": {
+    "applicable": true,
+    "status": "DISPATCHED",
+    "attempts": [
+      {
+        "attempt": 1,
+        "utc": "2026-10-31T03:42:22.373914+00:00",
+        "epoch": 1793418142.374,
+        "rc": 0
+      }
+    ]
+  },
+  "note": "Per-leg workflow flags only. Cross-leg continuity (leg 2 start before leg 1 end, max gap across merged timeline) is computed by the grader. Missing leg 2 means C4.2 FAIL OPEN."
+}
